@@ -18,12 +18,15 @@ public:
   explicit th_pool_t(unsigned int k);
   ~th_pool_t();
   void submit(f_t f);
+  void wait();
 
 private:
   void execute();
   std::queue< f_t > tasks_;
   std::mutex mx_;
   std::condition_variable cd_;
+  std::condition_variable wait_cd_;
+  size_t counter = 0;
   bool stop_{false};
   std::vector< std::thread > ths_;
 };
@@ -35,7 +38,19 @@ int main()
   {
     pool.submit(task_t{});
   }
+  pool.wait();
+  std::cout << "123\n";
 } // pool.~th_poop_t()
+
+void th_pool_t::wait()
+{
+  std::unique_lock< std::mutex > lck(mx_);
+  auto proceed = [&]()
+  {
+    return !counter || stop_;
+  };
+  wait_cd_.wait(lck, proceed);
+}
 
 void th_pool_t::submit(f_t f)
 {
@@ -78,7 +93,7 @@ void task_t::operator()()
 
 void th_pool_t::execute()
 {
-  std::unique_lock lck(mx_);
+  std::unique_lock< std::mutex > lck(mx_);
   do
   {
     auto proceed = [&]()
@@ -86,17 +101,21 @@ void th_pool_t::execute()
       return !tasks_.empty() || stop_;
     };
     cd_.wait(lck, proceed);
-    if (tasks_.empty())
-      continue;
     auto task = std::move(tasks_.front());
     tasks_.pop();
     lck.unlock();
     try
     {
       task();
+      lck.lock();
+      // TODO:
     }
     catch (...)
     {}
     lck.lock();
+    if (tasks_.empty())
+    {
+      wait_cd_.notify_one();
+    }
   } while (!stop_ || !tasks_.empty());
 } // lck.~unique_lock() -> unlock()
