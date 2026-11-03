@@ -19,6 +19,8 @@ public:
   ~th_pool_t();
   void submit(f_t f);
   void wait();
+  void pause();
+  void resume();
 
 private:
   void execute();
@@ -28,6 +30,7 @@ private:
   std::condition_variable wait_cd_;
   size_t counter = 0;
   bool stop_{false};
+  bool is_pause_{false};
   std::vector< std::thread > ths_;
 };
 
@@ -50,6 +53,23 @@ void th_pool_t::wait()
     return !counter;
   };
   wait_cd_.wait(lck, proceed);
+}
+
+void th_pool_t::pause()
+{
+  {
+    std::scoped_lock< std::mutex > lck(mx_);
+    is_pause_ = true;
+  }
+}
+
+void th_pool_t::resume()
+{
+  {
+    std::scoped_lock< std::mutex > lck(mx_);
+    is_pause_ = false;
+  }
+  cd_.notify_all();
 }
 
 void th_pool_t::submit(f_t f)
@@ -79,6 +99,7 @@ th_pool_t::~th_pool_t()
   {
     std::scoped_lock< std::mutex > lck(mx_);
     stop_ = true;
+    is_pause_ = false;
   }
   cd_.notify_all();
   for (auto&& th : ths_)
@@ -101,7 +122,7 @@ void th_pool_t::execute()
   {
     auto proceed = [&]()
     {
-      return !tasks_.empty() || stop_;
+      return (!is_pause_ && !tasks_.empty()) || stop_;
     };
     cd_.wait(lck, proceed);
     if (tasks_.empty())
