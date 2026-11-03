@@ -47,16 +47,18 @@ void th_pool_t::wait()
   std::unique_lock< std::mutex > lck(mx_);
   auto proceed = [&]()
   {
-    return !counter || stop_;
+    return !counter;
   };
   wait_cd_.wait(lck, proceed);
 }
 
 void th_pool_t::submit(f_t f)
 {
-  mx_.lock();
-  tasks_.push(std::move(f));
-  mx_.unlock();
+  {
+    std::scoped_lock< std::mutex > lck(mx_);
+    tasks_.push(std::move(f));
+    ++counter;
+  }
   cd_.notify_one();
 }
 
@@ -74,9 +76,10 @@ th_pool_t::th_pool_t(unsigned int k)
 
 th_pool_t::~th_pool_t()
 {
-  mx_.lock();
-  stop_ = true;
-  mx_.unlock();
+  {
+    std::scoped_lock< std::mutex > lck(mx_);
+    stop_ = true;
+  }
   cd_.notify_all();
   for (auto&& th : ths_)
   {
@@ -101,21 +104,24 @@ void th_pool_t::execute()
       return !tasks_.empty() || stop_;
     };
     cd_.wait(lck, proceed);
+    if (tasks_.empty())
+    {
+      continue;
+    }
     auto task = std::move(tasks_.front());
     tasks_.pop();
     lck.unlock();
     try
     {
       task();
-      lck.lock();
-      // TODO:
     }
     catch (...)
     {}
     lck.lock();
-    if (tasks_.empty())
+    if (!--counter)
     {
-      wait_cd_.notify_one();
+      wait_cd_.notify_all();
     }
-  } while (!stop_ || !tasks_.empty());
+  }
+  while (!stop_ || !tasks_.empty());
 } // lck.~unique_lock() -> unlock()
