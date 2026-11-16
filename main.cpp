@@ -65,10 +65,8 @@ void th_pool_t::wait()
 
 void th_pool_t::pause()
 {
-  {
-    std::scoped_lock< std::mutex > lck(mx_);
-    is_pause_ = true;
-  }
+  std::scoped_lock< std::mutex > lck(mx_);
+  is_pause_ = true;
 }
 
 void th_pool_t::resume()
@@ -124,7 +122,7 @@ void task_t::operator()()
   std::uniform_int_distribution< int > dist(100, 3000);
 
   std::this_thread::sleep_for(std::chrono::milliseconds(dist(gen)));
-  // std::osyncstream(std::cout) << "!\n";
+  std::osyncstream(std::cout) << "!\n";
 }
 
 void th_pool_t::execute(size_t pos)
@@ -134,30 +132,71 @@ void th_pool_t::execute(size_t pos)
   {
     auto proceed = [&]()
     {
-      return (!is_pause_ && !tasks_.empty()) || stop_;
+      if (stop_ && !counter_)
+      {
+        return true;
+      }
+      if (is_pause_)
+      {
+        return false;
+      }
+      if (!tasks_.empty())
+      {
+        return true;
+      }
+      std::scoped_lock< std::mutex > localLock(ltmx_);
+      for (size_t i = 0; i < localTasks_.size(); ++i)
+      {
+        if (!localTasks_[i].empty())
+        {
+          return true;
+        }
+      }
+      return false;
     };
     cd_.wait(lck, proceed);
 
     if (tasks_.empty())
     {
-      continue;
-    }
-
-    size_t b = std::max(size_t{1}, tasks_.size() / (k_ * threadsCount_));
-    std::osyncstream(std::cout) << "POS: " << pos << "; B: " << b << '\n';
-
-    for (size_t i = 0; i < b; ++i)
-    {
       std::scoped_lock< std::mutex > localLock(ltmx_);
-      localTasks_[pos].push(std::move(tasks_.front()));
-      tasks_.pop();
+      bool isStolen = false;
+      for (size_t offset = 1; offset < threadsCount_; ++offset)
+      {
+        size_t victim = (pos + offset) % threadsCount_;
+        if (!localTasks_[victim].empty())
+        {
+          localTasks_[pos].push(std::move(localTasks_[victim].front()));
+          localTasks_[victim].pop();
+          isStolen = true;
+          break;
+        }
+      }
+      if (!isStolen)
+      {
+        continue;
+      }
+    }
+    else
+    {
+      size_t b = std::max(size_t{1}, tasks_.size() / (k_ * threadsCount_));
+
+      std::scoped_lock< std::mutex > localLock(ltmx_);
+      for (size_t i = 0; i < b; ++i)
+      {
+        localTasks_[pos].push(std::move(tasks_.front()));
+        tasks_.pop();
+      }
+
+      if (b > 1)
+      {
+        cd_.notify_all();
+      }
     }
 
     lck.unlock();
 
     try
     {
-      size_t i = 0;
       auto cond = [&]()
       {
         return !is_pause_ || stop_;
@@ -178,21 +217,11 @@ void th_pool_t::execute(size_t pos)
         localTasks_[pos].pop();
 
         localLock.unlock();
-
-        {
-          std::scoped_lock< std::mutex > s(mx_);
-          std::osyncstream(std::cout) << "POS: " << pos << "; TASK: " << i << "; START; SIZE: " << counter_ << '\n';
-        }
-
         task();
-
         {
           std::scoped_lock< std::mutex > s(mx_);
           --counter_;
-          std::osyncstream(std::cout) << "POS: " << pos << "; TASK: " << i << "; END; SIZE: " << counter_ << '\n';
         }
-
-        ++i;
       }
     }
     catch (...)
@@ -215,5 +244,5 @@ void th_pool_t::execute(size_t pos)
       wait_cd_.notify_all();
     }
   }
-  while (!stop_ || !tasks_.empty());
+  while (!stop_ || counter_ > 0);
 } // lck.~unique_lock() -> unlock()
